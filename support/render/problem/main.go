@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/go-errors/errors"
-	"github.com/stellar/go/support/log"
 	"golang.org/x/net/context"
 )
 
@@ -86,7 +85,6 @@ func render(ctx context.Context, w http.ResponseWriter, p P) {
 
 	if err != nil {
 		err := errors.Wrap(err, 1)
-		log.Ctx(ctx).WithStack(err).Error(err)
 		http.Error(w, "error rendering problem", http.StatusInternalServerError)
 		return
 	}
@@ -107,7 +105,6 @@ func renderErr(ctx context.Context, w http.ResponseWriter, err error) {
 	// If this error is not a registered error
 	// log it and replace it with a 500 error
 	if !ok {
-		log.Ctx(ctx).WithStack(err).Error(err)
 		p = ServerError
 	}
 
