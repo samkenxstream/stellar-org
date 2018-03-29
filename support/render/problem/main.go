@@ -84,7 +84,6 @@ func render(ctx context.Context, w http.ResponseWriter, p P) {
 	js, err := json.MarshalIndent(p, "", "  ")
 
 	if err != nil {
-		err := errors.Wrap(err, 1)
 		http.Error(w, "error rendering problem", http.StatusInternalServerError)
 		return
 	}
