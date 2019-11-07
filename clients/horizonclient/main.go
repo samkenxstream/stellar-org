@@ -21,6 +21,7 @@ import (
 	hProtocol "github.com/stellar/go/protocols/horizon"
 	"github.com/stellar/go/protocols/horizon/effects"
 	"github.com/stellar/go/protocols/horizon/operations"
+	"github.com/stellar/go/support/clock"
 	"github.com/stellar/go/support/render/problem"
 	"github.com/stellar/go/txnbuild"
 )
@@ -45,6 +46,9 @@ type includeFailed bool
 
 // AssetType represents `asset_type` param in queries
 type AssetType string
+
+// join represents `join` param in queries
+type join string
 
 const (
 	// OrderAsc represents an ascending order parameter
@@ -110,6 +114,11 @@ type HTTP interface {
 	PostForm(url string, data url.Values) (resp *http.Response, err error)
 }
 
+// UniversalTimeHandler is a function that is called to return the UTC unix time in seconds.
+// This handler is used when getting the time from a horizon server, which can be used to calculate
+// transaction timebounds.
+type UniversalTimeHandler func() int64
+
 // Client struct contains data for creating a horizon client that connects to the stellar network.
 type Client struct {
 	// URL of Horizon server to connect
@@ -125,6 +134,9 @@ type Client struct {
 	AppVersion     string
 	horizonTimeOut time.Duration
 	isTestNet      bool
+
+	// clock is a Clock returning the current time.
+	clock *clock.Clock
 }
 
 // ClientInterface contains methods implemented by the horizon client
@@ -175,6 +187,9 @@ type ClientInterface interface {
 	PrevOffersPage(hProtocol.OffersPage) (hProtocol.OffersPage, error)
 	NextTradesPage(hProtocol.TradesPage) (hProtocol.TradesPage, error)
 	PrevTradesPage(hProtocol.TradesPage) (hProtocol.TradesPage, error)
+	HomeDomainForAccount(aid string) (string, error)
+	NextTradeAggregationsPage(hProtocol.TradeAggregationsPage) (hProtocol.TradeAggregationsPage, error)
+	PrevTradeAggregationsPage(hProtocol.TradeAggregationsPage) (hProtocol.TradeAggregationsPage, error)
 }
 
 // DefaultTestNetClient is a default client to connect to test network.
@@ -207,7 +222,7 @@ type AccountRequest struct {
 
 // EffectRequest struct contains data for getting effects from a horizon server.
 // "ForAccount", "ForLedger", "ForOperation" and "ForTransaction": Not more than one of these
-//  can be set at a time. If none are set, the default is to return all effects.
+// can be set at a time. If none are set, the default is to return all effects.
 // The query parameters (Order, Cursor and Limit) are optional. All or none can be set.
 type EffectRequest struct {
 	ForAccount     string
@@ -270,6 +285,7 @@ type OperationRequest struct {
 	Cursor         string
 	Limit          uint
 	IncludeFailed  bool
+	Join           string
 	endpoint       string
 }
 

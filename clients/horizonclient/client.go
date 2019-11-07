@@ -64,7 +64,7 @@ func (c *Client) sendRequestURL(requestURL string, method string, a interface{})
 		return
 	}
 
-	err = decodeResponse(resp, &a)
+	err = decodeResponse(resp, &a, c)
 	cancel()
 	return
 }
@@ -88,7 +88,7 @@ func (c *Client) stream(
 	for {
 		// updates the url with new cursor
 		su.RawQuery = query.Encode()
-		req, err := http.NewRequest("GET", fmt.Sprintf("%s", su), nil)
+		req, err := http.NewRequest("GET", su.String(), nil)
 		if err != nil {
 			return errors.Wrap(err, "error creating HTTP request")
 		}
@@ -280,7 +280,7 @@ func (c *Client) Ledgers(request LedgerRequest) (ledgers hProtocol.LedgersPage, 
 // LedgerDetail returns information about a particular ledger for a given sequence number
 // See https://www.stellar.org/developers/horizon/reference/endpoints/ledgers-single.html
 func (c *Client) LedgerDetail(sequence uint32) (ledger hProtocol.Ledger, err error) {
-	if sequence <= 0 {
+	if sequence == 0 {
 		err = errors.New("invalid sequence number provided")
 	}
 
@@ -289,7 +289,6 @@ func (c *Client) LedgerDetail(sequence uint32) (ledger hProtocol.Ledger, err err
 	}
 
 	request := LedgerRequest{forSequence: sequence}
-
 	err = c.sendRequest(request, &ledger)
 	return
 }
@@ -350,7 +349,10 @@ func (c *Client) OperationDetail(id string) (ops operations.Operation, err error
 	}
 
 	ops, err = operations.UnmarshalOperation(baseRecord.GetTypeI(), dataString)
-	return ops, errors.Wrap(err, "unmarshaling to the correct operation type")
+	if err != nil {
+		return ops, errors.Wrap(err, "unmarshaling to the correct operation type")
+	}
+	return ops, nil
 }
 
 // SubmitTransactionXDR submits a transaction represented as a base64 XDR string to the network. err can be either error object or horizon.Error object.
@@ -462,7 +464,7 @@ func (c *Client) StreamEffects(ctx context.Context, request EffectRequest, handl
 // StreamOperations streams stellar operations. It can be used to stream all operations or operations
 // for an account. Use context.WithCancel to stop streaming or context.Background() if you want to
 // stream indefinitely. OperationHandler is a user-supplied function that is executed for each streamed
-//  operation received.
+// operation received.
 func (c *Client) StreamOperations(ctx context.Context, request OperationRequest, handler OperationHandler) error {
 	return request.SetOperationsEndpoint().StreamOperations(ctx, c, handler)
 }
@@ -471,7 +473,7 @@ func (c *Client) StreamOperations(ctx context.Context, request OperationRequest,
 // for an account. Payments include create_account, payment, path_payment and account_merge operations.
 // Use context.WithCancel to stop streaming or context.Background() if you want to
 // stream indefinitely. OperationHandler is a user-supplied function that is executed for each streamed
-//  operation received.
+// operation received.
 func (c *Client) StreamPayments(ctx context.Context, request OperationRequest, handler OperationHandler) error {
 	return request.SetPaymentsEndpoint().StreamOperations(ctx, c, handler)
 }
@@ -506,7 +508,7 @@ func (c *Client) FetchTimebounds(seconds int64) (txnbuild.Timebounds, error) {
 	if err != nil {
 		return txnbuild.Timebounds{}, errors.Wrap(err, "unable to parse horizon url")
 	}
-	currentTime := currentServerTime(serverURL.Hostname())
+	currentTime := currentServerTime(serverURL.Hostname(), c.clock.Now().UTC().Unix())
 	if currentTime != 0 {
 		return txnbuild.NewTimebounds(0, currentTime+seconds), nil
 	}
@@ -618,6 +620,34 @@ func (c *Client) NextTradesPage(page hProtocol.TradesPage) (trades hProtocol.Tra
 // PrevTradesPage returns the previous page of trades.
 func (c *Client) PrevTradesPage(page hProtocol.TradesPage) (trades hProtocol.TradesPage, err error) {
 	err = c.sendRequestURL(page.Links.Prev.Href, "get", &trades)
+	return
+}
+
+// HomeDomainForAccount returns the home domain for a single account.
+func (c *Client) HomeDomainForAccount(aid string) (string, error) {
+	if aid == "" {
+		return "", errors.New("no account ID provided")
+	}
+
+	accountDetail, err := c.AccountDetail(AccountRequest{AccountID: aid})
+	if err != nil {
+		return "", errors.Wrap(err, "get account detail failed")
+	}
+
+	return accountDetail.HomeDomain, nil
+}
+
+// NextTradeAggregationsPage returns the next page of trade aggregations from the current
+// trade aggregations response.
+func (c *Client) NextTradeAggregationsPage(page hProtocol.TradeAggregationsPage) (ta hProtocol.TradeAggregationsPage, err error) {
+	err = c.sendRequestURL(page.Links.Next.Href, "get", &ta)
+	return
+}
+
+// PrevTradeAggregationsPage returns the previous page of trade aggregations from the current
+// trade aggregations response.
+func (c *Client) PrevTradeAggregationsPage(page hProtocol.TradeAggregationsPage) (ta hProtocol.TradeAggregationsPage, err error) {
+	err = c.sendRequestURL(page.Links.Prev.Href, "get", &ta)
 	return
 }
 

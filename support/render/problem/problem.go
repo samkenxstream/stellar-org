@@ -33,7 +33,7 @@ var (
 		Type:   "not_found",
 		Title:  "Resource Missing",
 		Status: http.StatusNotFound,
-		Detail: "The resource at the url requested was not found.  This is usually " +
+		Detail: "The resource at the url requested was not found.  This usually " +
 			"occurs for one of two reasons:  The url requested is not valid, or no " +
 			"data in our database could be found with the parameters provided.",
 	}
@@ -44,7 +44,7 @@ var (
 		Type:   "bad_request",
 		Title:  "Bad Request",
 		Status: http.StatusBadRequest,
-		Detail: "The request you sent was invalid in some way",
+		Detail: "The request you sent was invalid in some way.",
 	}
 )
 
@@ -81,6 +81,18 @@ func RegisterError(err error, p P) {
 // The default service host points to `https://stellar.org/horizon-errors/`.
 func RegisterHost(host string) {
 	ServiceHost = host
+}
+
+// ReportFunc is a function type used to report unexpected errors.
+type ReportFunc func(context.Context, error)
+
+var reportFn ReportFunc
+
+// RegisterReportFunc registers the report function that you want to use to
+// report errors. Once reportFn is initialzied, it will be used to report
+// unexpected errors.
+func RegisterReportFunc(fn ReportFunc) {
+	reportFn = fn
 }
 
 // Render writes a http response to `w`, compliant with the "Problem

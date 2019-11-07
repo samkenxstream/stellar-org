@@ -2,9 +2,7 @@ package horizonclient
 
 import (
 	"context"
-	"fmt"
 	"testing"
-	"time"
 
 	hProtocol "github.com/stellar/go/protocols/horizon"
 	"github.com/stellar/go/support/http/httptest"
@@ -42,7 +40,7 @@ func TestTradeRequestBuildUrl(t *testing.T) {
 	assert.Equal(t, "trades?cursor=123", endpoint)
 
 	tr = TradeRequest{ForOfferID: "123", ForAccount: "GCLWGQPMKXQSPF776IU33AH4PZNOOWNAWGGKVTBQMIC5IMKUNP3E6NVU"}
-	endpoint, err = tr.BuildURL()
+	_, err = tr.BuildURL()
 
 	// error case: too many parameters for building any operation endpoint
 	if assert.Error(t, err) {
@@ -57,86 +55,6 @@ func TestTradeRequestBuildUrl(t *testing.T) {
 
 }
 
-func ExampleClient_Trades() {
-
-	client := DefaultPublicNetClient
-	// Find all trades
-	tr := TradeRequest{Cursor: "123456", Limit: 30, Order: OrderAsc}
-	trades, err := client.Trades(tr)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Print(trades)
-}
-
-func ExampleClient_NextTradesPage() {
-	client := DefaultPublicNetClient
-	// all trades
-	tradeRequest := TradeRequest{Cursor: "123456", Limit: 30, Order: OrderAsc}
-	trades, err := client.Trades(tradeRequest)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Print(trades)
-
-	// get next pages.
-	recordsFound := false
-	if len(trades.Embedded.Records) > 0 {
-		recordsFound = true
-	}
-	page := trades
-	// get the next page of records if recordsFound is true
-	for recordsFound {
-		// next page
-		nextPage, err := client.NextTradesPage(page)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		page = nextPage
-		if len(nextPage.Embedded.Records) == 0 {
-			recordsFound = false
-		}
-		fmt.Println(nextPage)
-	}
-}
-
-func ExampleClient_PrevTradesPage() {
-	client := DefaultPublicNetClient
-	// all trades
-	tradeRequest := TradeRequest{Cursor: "123456", Limit: 30, Order: OrderAsc}
-	trades, err := client.Trades(tradeRequest)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Print(trades)
-
-	// get prev pages.
-	recordsFound := false
-	if len(trades.Embedded.Records) > 0 {
-		recordsFound = true
-	}
-	page := trades
-	// get the prev page of records if recordsFound is true
-	for recordsFound {
-		// prev page
-		prevPage, err := client.PrevTradesPage(page)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		page = prevPage
-		if len(prevPage.Embedded.Records) == 0 {
-			recordsFound = false
-		}
-		fmt.Println(prevPage)
-	}
-}
 func TestTradesRequest(t *testing.T) {
 	hmock := httptest.NewClient()
 	client := &Client{
@@ -193,28 +111,6 @@ func TestTradesRequest(t *testing.T) {
 	// error case
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "too many parameters")
-	}
-}
-
-func ExampleClient_StreamTrades() {
-	client := DefaultTestNetClient
-	// all trades
-	tradeRequest := TradeRequest{Cursor: "760209215489"}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		// Stop streaming after 60 seconds.
-		time.Sleep(60 * time.Second)
-		cancel()
-	}()
-
-	printHandler := func(tr hProtocol.Trade) {
-		fmt.Println(tr)
-	}
-	err := client.StreamTrades(ctx, tradeRequest, printHandler)
-
-	if err != nil {
-		fmt.Println(err)
 	}
 }
 

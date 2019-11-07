@@ -2,9 +2,7 @@ package horizonclient
 
 import (
 	"context"
-	"fmt"
 	"testing"
-	"time"
 
 	"github.com/stellar/go/protocols/horizon/operations"
 	"github.com/stellar/go/support/http/httptest"
@@ -49,134 +47,36 @@ func TestOperationRequestBuildUrl(t *testing.T) {
 	assert.Equal(t, "transactions/123/payments", endpoint)
 
 	op = OperationRequest{ForLedger: 123, forOperationID: "789", endpoint: "operations"}
-	endpoint, err = op.BuildURL()
+	_, err = op.BuildURL()
 
 	// error case: too many parameters for building any operation endpoint
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "invalid request: too many parameters")
 	}
 
-	op = OperationRequest{Cursor: "123456", Limit: 30, Order: OrderAsc, endpoint: "operations"}
+	op = OperationRequest{Cursor: "123456", Limit: 30, Order: OrderAsc, endpoint: "operations", Join: "transactions"}
 	endpoint, err = op.BuildURL()
 	// It should return valid all operations endpoint with query params and no errors
 	require.NoError(t, err)
-	assert.Equal(t, "operations?cursor=123456&limit=30&order=asc", endpoint)
+	assert.Equal(t, "operations?cursor=123456&join=transactions&limit=30&order=asc", endpoint)
 
-	op = OperationRequest{Cursor: "123456", Limit: 30, Order: OrderAsc, endpoint: "payments"}
+	op = OperationRequest{Cursor: "123456", Limit: 30, Order: OrderAsc, endpoint: "payments", Join: "transactions"}
 	endpoint, err = op.BuildURL()
 	// It should return valid all operations endpoint with query params and no errors
 	require.NoError(t, err)
-	assert.Equal(t, "payments?cursor=123456&limit=30&order=asc", endpoint)
-}
+	assert.Equal(t, "payments?cursor=123456&join=transactions&limit=30&order=asc", endpoint)
 
-func ExampleClient_StreamOperations() {
-	client := DefaultTestNetClient
-	// operations for an account
-	opRequest := OperationRequest{ForAccount: "GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR", Cursor: "760209215489"}
+	op = OperationRequest{ForAccount: "GCLWGQPMKXQSPF776IU33AH4PZNOOWNAWGGKVTBQMIC5IMKUNP3E6NVU", endpoint: "payments", Join: "transactions"}
+	endpoint, err = op.BuildURL()
+	// It should return valid all operations endpoint with query params and no errors
+	require.NoError(t, err)
+	assert.Equal(t, "accounts/GCLWGQPMKXQSPF776IU33AH4PZNOOWNAWGGKVTBQMIC5IMKUNP3E6NVU/payments?join=transactions", endpoint)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		// Stop streaming after 60 seconds.
-		time.Sleep(60 * time.Second)
-		cancel()
-	}()
-
-	printHandler := func(op operations.Operation) {
-		fmt.Println(op)
-	}
-	err := client.StreamOperations(ctx, opRequest, printHandler)
-	if err != nil {
-		fmt.Println(err)
-	}
-}
-
-func ExampleClient_StreamPayments() {
-	client := DefaultTestNetClient
-	// all payments
-	opRequest := OperationRequest{Cursor: "760209215489"}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		// Stop streaming after 60 seconds.
-		time.Sleep(60 * time.Second)
-		cancel()
-	}()
-
-	printHandler := func(op operations.Operation) {
-		fmt.Println(op)
-	}
-	err := client.StreamPayments(ctx, opRequest, printHandler)
-	if err != nil {
-		fmt.Println(err)
-	}
-}
-
-func ExampleClient_NextOperationsPage() {
-	client := DefaultPublicNetClient
-	// all operations
-	operationRequest := OperationRequest{Limit: 20}
-	ops, err := client.Operations(operationRequest)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Print(ops)
-
-	// get next pages.
-	recordsFound := false
-	if len(ops.Embedded.Records) > 0 {
-		recordsFound = true
-	}
-	page := ops
-	// get the next page of records if recordsFound is true
-	for recordsFound {
-		// next page
-		nextPage, err := client.NextOperationsPage(page)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		page = nextPage
-		if len(nextPage.Embedded.Records) == 0 {
-			recordsFound = false
-		}
-		fmt.Println(nextPage)
-	}
-}
-
-func ExampleClient_PrevOperationsPage() {
-	client := DefaultPublicNetClient
-	// all operations
-	operationRequest := OperationRequest{Limit: 20}
-	ops, err := client.Operations(operationRequest)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Print(ops)
-
-	// get prev pages.
-	recordsFound := false
-	if len(ops.Embedded.Records) > 0 {
-		recordsFound = true
-	}
-	page := ops
-	// get the prev page of records if recordsFound is true
-	for recordsFound {
-		// prev page
-		prevPage, err := client.PrevOperationsPage(page)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		page = prevPage
-		if len(prevPage.Embedded.Records) == 0 {
-			recordsFound = false
-		}
-		fmt.Println(prevPage)
-	}
+	op = OperationRequest{forOperationID: "1234", endpoint: "payments", Join: "transactions"}
+	endpoint, err = op.BuildURL()
+	// It should return valid all operations endpoint with query params and no errors
+	require.NoError(t, err)
+	assert.Equal(t, "operations/1234?join=transactions", endpoint)
 }
 
 func TestNextOperationsPage(t *testing.T) {
