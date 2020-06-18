@@ -1,10 +1,20 @@
 package horizon
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 
+	"github.com/stellar/go/services/horizon/internal/actions"
+	horizonContext "github.com/stellar/go/services/horizon/internal/context"
+	"github.com/stellar/go/services/horizon/internal/db2/history"
+	"github.com/stellar/go/services/horizon/internal/expingest"
+	"github.com/stellar/go/services/horizon/internal/ledger"
+	hProblem "github.com/stellar/go/services/horizon/internal/render/problem"
 	"github.com/stellar/go/services/horizon/internal/test"
+	"github.com/stellar/go/support/db"
+	"github.com/stellar/go/xdr"
 	"github.com/stellar/throttled"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -113,32 +123,219 @@ func TestRateLimitMiddlewareTestSuite(t *testing.T) {
 	suite.Run(t, new(RateLimitMiddlewareTestSuite))
 }
 
-// Rate Limiting works with redis
-func TestRateLimit_Redis(t *testing.T) {
-	ht := StartHTTPTest(t, "base")
-	defer ht.Finish()
-	c := NewTestConfig()
-	c.RateQuota = &throttled.RateQuota{
-		MaxRate:  throttled.PerHour(10),
-		MaxBurst: 9,
-	}
-	c.RedisURL = "redis://127.0.0.1:6379/"
-	app := NewApp(c)
-	defer app.Close()
-	rh := NewRequestHelper(app)
+func TestStateMiddleware(t *testing.T) {
+	tt := test.Start(t)
+	defer tt.Finish()
+	test.ResetHorizonDB(t, tt.HorizonDB)
 
-	redis := app.redis.Get()
-	_, err := redis.Do("FLUSHDB")
-	assert.Nil(t, err)
+	q := &history.Q{tt.HorizonSession()}
 
-	for i := 0; i < 10; i++ {
-		w := rh.Get("/")
-		assert.Equal(t, 200, w.Code)
+	request, err := http.NewRequest("GET", "http://localhost", nil)
+	tt.Assert.NoError(err)
+
+	expectTransaction := true
+	endpoint := func(w http.ResponseWriter, r *http.Request) {
+		session := r.Context().Value(&horizonContext.SessionContextKey).(*db.Session)
+		if (session.GetTx() == nil) == expectTransaction {
+			t.Fatalf("expected transaction to be in session: %v", expectTransaction)
+		}
+		w.WriteHeader(http.StatusOK)
 	}
 
-	w := rh.Get("/")
-	assert.Equal(t, 429, w.Code)
+	stateMiddleware := &StateMiddleware{
+		HorizonSession: tt.HorizonSession(),
+	}
+	handler := stateMiddleware.Wrap(http.HandlerFunc(endpoint))
 
-	w = rh.Get("/", test.RequestHelperRemoteAddr("127.0.0.2"))
-	assert.Equal(t, 200, w.Code)
+	for i, testCase := range []struct {
+		name                string
+		noStateVerification bool
+		stateInvalid        bool
+		latestHistoryLedger xdr.Uint32
+		lastIngestedLedger  uint32
+		ingestionVersion    int
+		sseRequest          bool
+		expectedStatus      int
+		expectTransaction   bool
+	}{
+		{
+			name:                "responds with 500 if q.GetExpStateInvalid returns true",
+			stateInvalid:        true,
+			latestHistoryLedger: 2,
+			lastIngestedLedger:  2,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      http.StatusInternalServerError,
+			expectTransaction:   false,
+		},
+		{
+			name:                "responds with still ingesting if lastIngestedLedger <= 0",
+			stateInvalid:        false,
+			latestHistoryLedger: 0,
+			lastIngestedLedger:  0,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      hProblem.StillIngesting.Status,
+			expectTransaction:   false,
+		},
+		{
+			name:                "responds with still ingesting if lastIngestedLedger < latestHistoryLedger",
+			stateInvalid:        false,
+			latestHistoryLedger: 3,
+			lastIngestedLedger:  2,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      hProblem.StillIngesting.Status,
+			expectTransaction:   false,
+		},
+		{
+			name:                "responds with still ingesting if lastIngestedLedger > latestHistoryLedger",
+			stateInvalid:        false,
+			latestHistoryLedger: 4,
+			lastIngestedLedger:  5,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      hProblem.StillIngesting.Status,
+			expectTransaction:   false,
+		},
+		{
+			name:                "responds with still ingesting if version != expingest.CurrentVersion",
+			stateInvalid:        false,
+			latestHistoryLedger: 5,
+			lastIngestedLedger:  5,
+			ingestionVersion:    expingest.CurrentVersion - 1,
+			sseRequest:          false,
+			expectedStatus:      hProblem.StillIngesting.Status,
+			expectTransaction:   false,
+		},
+		{
+			name:                "succeeds",
+			stateInvalid:        false,
+			latestHistoryLedger: 6,
+			lastIngestedLedger:  6,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      http.StatusOK,
+			expectTransaction:   true,
+		},
+		{
+			name:                "succeeds with SSE request",
+			stateInvalid:        false,
+			latestHistoryLedger: 7,
+			lastIngestedLedger:  7,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          true,
+			expectedStatus:      http.StatusOK,
+			expectTransaction:   false,
+		},
+		{
+			name:                "succeeds without state verification",
+			noStateVerification: true,
+			stateInvalid:        false,
+			latestHistoryLedger: 8,
+			lastIngestedLedger:  8,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      http.StatusOK,
+			expectTransaction:   true,
+		},
+		{
+			name:                "succeeds without state verification and invalid state",
+			noStateVerification: true,
+			stateInvalid:        true,
+			latestHistoryLedger: 9,
+			lastIngestedLedger:  9,
+			ingestionVersion:    expingest.CurrentVersion,
+			sseRequest:          false,
+			expectedStatus:      http.StatusOK,
+			expectTransaction:   true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			stateMiddleware.NoStateVerification = testCase.noStateVerification
+			tt.Assert.NoError(q.UpdateExpStateInvalid(testCase.stateInvalid))
+			_, err = q.InsertLedger(xdr.LedgerHeaderHistoryEntry{
+				Hash: xdr.Hash{byte(i)},
+				Header: xdr.LedgerHeader{
+					LedgerSeq:          testCase.latestHistoryLedger,
+					PreviousLedgerHash: xdr.Hash{byte(i)},
+				},
+			}, 0, 0, 0, 0)
+			tt.Assert.NoError(err)
+			tt.Assert.NoError(q.UpdateLastLedgerExpIngest(testCase.lastIngestedLedger))
+			tt.Assert.NoError(q.UpdateExpIngestVersion(testCase.ingestionVersion))
+
+			if testCase.sseRequest {
+				request.Header.Set("Accept", "text/event-stream")
+			} else {
+				request.Header.Del("Accept")
+			}
+
+			w := httptest.NewRecorder()
+			expectTransaction = testCase.expectTransaction
+			handler.ServeHTTP(w, request)
+			tt.Assert.Equal(testCase.expectedStatus, w.Code)
+			if testCase.expectedStatus == http.StatusOK && !testCase.sseRequest {
+				tt.Assert.Equal(
+					w.Header().Get(actions.LastLedgerHeaderName),
+					strconv.FormatInt(int64(testCase.lastIngestedLedger), 10))
+			} else {
+				tt.Assert.Equal(w.Header().Get(actions.LastLedgerHeaderName), "")
+			}
+		})
+	}
+}
+
+func TestCheckHistoryStaleMiddleware(t *testing.T) {
+	tt := test.Start(t)
+	defer tt.Finish()
+	request, err := http.NewRequest("GET", "http://localhost", nil)
+	tt.Assert.NoError(err)
+
+	endpoint := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	for _, testCase := range []struct {
+		name           string
+		coreLatest     int32
+		historyLatest  int32
+		expectedStatus int
+		staleThreshold int32
+	}{
+		{
+			name:           "responds with a service unavailable if history is stale",
+			coreLatest:     4,
+			historyLatest:  2,
+			expectedStatus: http.StatusServiceUnavailable,
+			staleThreshold: 1,
+		},
+		{
+			name:           "succeeds",
+			coreLatest:     6,
+			historyLatest:  6,
+			expectedStatus: http.StatusOK,
+			staleThreshold: 1,
+		},
+		{
+			name:           "succeeds with threshold 0",
+			coreLatest:     6,
+			historyLatest:  5,
+			expectedStatus: http.StatusOK,
+			staleThreshold: 0,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			state := ledger.State{
+				CoreLatest:    testCase.coreLatest,
+				HistoryLatest: testCase.historyLatest,
+			}
+			ledger.SetState(state)
+			historyMiddleware := NewHistoryMiddleware(testCase.staleThreshold, tt.HorizonSession())
+			handler := historyMiddleware(http.HandlerFunc(endpoint))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, request)
+			tt.Assert.Equal(testCase.expectedStatus, w.Code)
+		})
+	}
 }

@@ -18,9 +18,8 @@ Compile and install Horizon as described in the [Horizon development guide](deve
 
 Horizon uses two Go tools you'll need to install:
 1. [go-bindata](github.com/kevinburke/go-bindata) is used to bundle test data
-2. [go-codegen](https://github.com/nullstyle/go-codegen) is used to generate some boilerplate code
 
-After the above are installed, run `go generate github.com/stellar/go/services/horizon/...`. This will look for any `.tmpl` files in the directory and use them to generate code when annotated structs are found in the package source.
+After the above are installed, run `go generate github.com/stellar/go/services/horizon/...`.
 
 ## <a name="scenarios"></a> Adding, rebuilding and using test scenarios
 
@@ -86,13 +85,7 @@ Check existing tests for more examples.
 
 ## <a name="tests"></a> Running Tests
 
-start a redis server on port `6379`
-
-```bash
-redis-server
-```
-
-then, run the all the Go monorepo tests like so (assuming you are at stellar/go, or run from stellar/go/services/horizon for just the Horizon subset):
+run the all the Go monorepo tests like so (assuming you are at stellar/go, or run from stellar/go/services/horizon for just the Horizon subset):
 
 ```bash
 go test ./...

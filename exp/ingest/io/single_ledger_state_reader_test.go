@@ -2,12 +2,15 @@ package io
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"io/ioutil"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/stellar/go/support/errors"
 	"github.com/stellar/go/support/historyarchive"
 	"github.com/stellar/go/xdr"
 	"github.com/stretchr/testify/mock"
@@ -43,7 +46,12 @@ func (s *SingleLedgerStateReaderTestSuite) SetupTest() {
 		On("BucketExists", mock.AnythingOfType("historyarchive.Hash")).
 		Return(true, nil).Times(21)
 
-	s.reader, err = MakeSingleLedgerStateReader(s.mockArchive, &MemoryTempSet{}, ledgerSeq)
+	s.reader, err = MakeSingleLedgerStateReader(
+		context.Background(),
+		s.mockArchive,
+		ledgerSeq,
+		0,
+	)
 	s.Require().NotNil(s.reader)
 	s.Require().NoError(err)
 	s.Assert().Equal(ledgerSeq, s.reader.sequence)
@@ -77,12 +85,12 @@ func (s *SingleLedgerStateReaderTestSuite) TestSimple() {
 			Return(createXdrStream(), nil).Once()
 	}
 
-	var e xdr.LedgerEntryChange
+	var e Change
 	var err error
 	e, err = s.reader.Read()
 	s.Require().NoError(err)
 
-	id := e.State.Data.MustAccount().AccountId
+	id := e.Post.Data.MustAccount().AccountId
 	s.Assert().Equal("GC3C4AKRBQLHOJ45U4XG35ESVWRDECWO5XLDGYADO6DPR3L7KIDVUMML", id.Address())
 
 	_, err = s.reader.Read()
@@ -196,7 +204,7 @@ func (s *SingleLedgerStateReaderTestSuite) TestEnsureLatestLiveEntry() {
 	entry, err := s.reader.Read()
 	s.Require().Nil(err)
 	// Latest entry balance is 1
-	s.Assert().Equal(xdr.Int64(1), entry.State.Data.Account.Balance)
+	s.Assert().Equal(xdr.Int64(1), entry.Post.Data.Account.Balance)
 
 	_, err = s.reader.Read()
 	s.Require().Equal(err, io.EOF)
@@ -251,6 +259,459 @@ func (s *SingleLedgerStateReaderTestSuite) TestMalformedProtocol11BucketNoMeta()
 	s.Assert().Equal("Error while reading from buckets: Read INITENTRY from version <11 bucket: 0@517bea4c6627a688a8ce501febd8c562e737e3d86b29689d9956217640f3c74b", err.Error())
 }
 
+func TestBucketExistsTestSuite(t *testing.T) {
+	suite.Run(t, new(BucketExistsTestSuite))
+}
+
+type BucketExistsTestSuite struct {
+	suite.Suite
+	mockArchive    *historyarchive.MockArchive
+	reader         *SingleLedgerStateReader
+	cancel         context.CancelFunc
+	expectedSleeps []time.Duration
+}
+
+func (s *BucketExistsTestSuite) SetupTest() {
+	s.mockArchive = &historyarchive.MockArchive{}
+
+	ledgerSeq := uint32(24123007)
+	s.mockArchive.
+		On("GetCheckpointHAS", ledgerSeq).
+		Return(historyarchive.HistoryArchiveState{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var err error
+	s.reader, err = MakeSingleLedgerStateReader(
+		ctx,
+		s.mockArchive,
+		ledgerSeq,
+		4,
+	)
+	s.cancel = cancel
+	s.Require().NoError(err)
+	s.reader.sleep = func(d time.Duration) {
+		if len(s.expectedSleeps) == 0 {
+			s.Assert().Fail("unexpected call to sleep()")
+			return
+		}
+		s.Assert().Equal(s.expectedSleeps[0], d)
+		s.expectedSleeps = s.expectedSleeps[1:]
+	}
+}
+
+func (s *BucketExistsTestSuite) TearDownTest() {
+	s.mockArchive.AssertExpectations(s.T())
+}
+
+func (s *BucketExistsTestSuite) testBucketExists(
+	numErrors int, expectedSleeps []time.Duration,
+) {
+	for _, expected := range []bool{true, false} {
+		hash := historyarchive.Hash{1, 2, 3}
+		if numErrors > 0 {
+			s.mockArchive.On("BucketExists", hash).
+				Return(true, errors.New("transient error")).Times(numErrors)
+		}
+		s.mockArchive.On("BucketExists", hash).
+			Return(expected, nil).Once()
+		s.expectedSleeps = expectedSleeps
+		exists, err := s.reader.bucketExists(hash)
+		s.Assert().Equal(expected, exists)
+		s.Assert().NoError(err)
+		s.Assert().Empty(s.expectedSleeps)
+	}
+}
+
+func (s *BucketExistsTestSuite) TestSucceedsFirstTime() {
+	s.testBucketExists(0, []time.Duration{})
+}
+
+func (s *BucketExistsTestSuite) TestSucceedsSecondTime() {
+	s.testBucketExists(1, []time.Duration{time.Second})
+}
+
+func (s *BucketExistsTestSuite) TestSucceedsThirdime() {
+	s.testBucketExists(2, []time.Duration{time.Second, 2 * time.Second})
+}
+
+func (s *BucketExistsTestSuite) TestSucceedsFourthTime() {
+	s.testBucketExists(3, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second})
+}
+
+func (s *BucketExistsTestSuite) TestFailsAfterFourthTime() {
+	hash := historyarchive.Hash{1, 2, 3}
+	s.mockArchive.On("BucketExists", hash).
+		Return(true, errors.New("transient error")).Times(5)
+	s.expectedSleeps = []time.Duration{
+		time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second,
+	}
+	_, err := s.reader.bucketExists(hash)
+	s.Assert().EqualError(err, "transient error")
+	s.Assert().Empty(s.expectedSleeps)
+}
+
+func TestReadBucketEntryTestSuite(t *testing.T) {
+	suite.Run(t, new(ReadBucketEntryTestSuite))
+}
+
+type ReadBucketEntryTestSuite struct {
+	suite.Suite
+	mockArchive *historyarchive.MockArchive
+	reader      *SingleLedgerStateReader
+	cancel      context.CancelFunc
+}
+
+func (s *ReadBucketEntryTestSuite) SetupTest() {
+	s.mockArchive = &historyarchive.MockArchive{}
+
+	ledgerSeq := uint32(24123007)
+	s.mockArchive.
+		On("GetCheckpointHAS", ledgerSeq).
+		Return(historyarchive.HistoryArchiveState{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var err error
+	s.reader, err = MakeSingleLedgerStateReader(
+		ctx,
+		s.mockArchive,
+		ledgerSeq,
+		2,
+	)
+	s.cancel = cancel
+	s.Require().NoError(err)
+}
+
+func (s *ReadBucketEntryTestSuite) TearDownTest() {
+	s.mockArchive.AssertExpectations(s.T())
+}
+
+func (s *ReadBucketEntryTestSuite) TestNewXDRStream() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+	expectedStream := createXdrStream(metaEntry(1), metaEntry(2))
+
+	hash, ok := expectedStream.ExpectedHash()
+	s.Require().NotEqual(historyarchive.Hash(hash), emptyHash)
+	s.Require().False(ok)
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(expectedStream, nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+	s.Require().True(stream == expectedStream)
+
+	hash, ok = stream.ExpectedHash()
+	s.Require().Equal(historyarchive.Hash(hash), emptyHash)
+	s.Require().True(ok)
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadAllEntries() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+	firstEntry := metaEntry(1)
+	secondEntry := metaEntry(2)
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(firstEntry, secondEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, firstEntry)
+
+	entry, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, secondEntry)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(io.EOF, err)
+}
+
+func (s *ReadBucketEntryTestSuite) TestFirstReadFailsWithContextError() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+	firstEntry := metaEntry(1)
+	secondEntry := metaEntry(2)
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(firstEntry, secondEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+	s.cancel()
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(context.Canceled, err)
+}
+
+func (s *ReadBucketEntryTestSuite) TestSecondReadFailsWithContextError() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+	firstEntry := metaEntry(1)
+	secondEntry := metaEntry(2)
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(firstEntry, secondEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, firstEntry)
+	s.cancel()
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(context.Canceled, err)
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryAllRetriesFail() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().EqualError(err, "Read wrong number of bytes from XDR")
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetryIgnoresProtocolCloseError() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(
+			createInvalidXdrStream(errors.New("stream error: stream ID 75; PROTOCOL_ERROR")),
+			nil,
+		).Once()
+
+	expectedEntry := metaEntry(1)
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(expectedEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, expectedEntry)
+
+	hash, ok := stream.ExpectedHash()
+	s.Require().Equal(historyarchive.Hash(hash), emptyHash)
+	s.Require().True(ok)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(err, io.EOF)
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetryFailsToCreateNewStream() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	var nilStream *historyarchive.XdrStream
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(nilStream, errors.New("cannot create new stream")).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(nilStream, errors.New("cannot create new stream")).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().EqualError(err, "Error creating new xdr stream: cannot create new stream")
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetrySucceedsAfterFailsToCreateNewStream() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	var nilStream *historyarchive.XdrStream
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(nilStream, errors.New("cannot create new stream")).Once()
+
+	firstEntry := metaEntry(1)
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(firstEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, firstEntry)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(io.EOF, err)
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetrySucceeds() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createInvalidXdrStream(nil), nil).Once()
+
+	expectedEntry := metaEntry(1)
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(expectedEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, expectedEntry)
+
+	hash, ok := stream.ExpectedHash()
+	s.Require().Equal(historyarchive.Hash(hash), emptyHash)
+	s.Require().True(ok)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(err, io.EOF)
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetrySucceedsWithDiscard() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	firstEntry := metaEntry(1)
+	secondEntry := metaEntry(2)
+
+	b := &bytes.Buffer{}
+	s.Require().NoError(historyarchive.WriteFramedXdr(b, firstEntry))
+	writeInvalidFrame(b)
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(xdrStreamFromBuffer(b), nil).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(firstEntry, secondEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, firstEntry)
+
+	entry, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, secondEntry)
+
+	hash, ok := stream.ExpectedHash()
+	s.Require().Equal(historyarchive.Hash(hash), emptyHash)
+	s.Require().True(ok)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(err, io.EOF)
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetryFailsWithDiscardError() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	firstEntry := metaEntry(1)
+
+	b := &bytes.Buffer{}
+	s.Require().NoError(historyarchive.WriteFramedXdr(b, firstEntry))
+	writeInvalidFrame(b)
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(xdrStreamFromBuffer(b), nil).Once()
+
+	b = &bytes.Buffer{}
+	b.WriteString("a")
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(xdrStreamFromBuffer(b), nil).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(xdrStreamFromBuffer(b), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, firstEntry)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().EqualError(err, "Error discarding from xdr stream: EOF")
+}
+
+func (s *ReadBucketEntryTestSuite) TestReadEntryRetrySucceedsAfterDiscardError() {
+	emptyHash := historyarchive.EmptyXdrArrayHash()
+
+	firstEntry := metaEntry(1)
+	secondEntry := metaEntry(2)
+
+	b := &bytes.Buffer{}
+	s.Require().NoError(historyarchive.WriteFramedXdr(b, firstEntry))
+	writeInvalidFrame(b)
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(xdrStreamFromBuffer(b), nil).Once()
+
+	b = &bytes.Buffer{}
+	b.WriteString("a")
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(xdrStreamFromBuffer(b), nil).Once()
+
+	s.mockArchive.
+		On("GetXdrStreamForHash", emptyHash).
+		Return(createXdrStream(firstEntry, secondEntry), nil).Once()
+
+	stream, err := s.reader.newXDRStream(emptyHash)
+	s.Require().NoError(err)
+
+	entry, err := s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, firstEntry)
+
+	entry, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().NoError(err)
+	s.Require().Equal(entry, secondEntry)
+
+	_, err = s.reader.readBucketEntry(stream, emptyHash)
+	s.Require().Equal(io.EOF, err)
+}
+
 func metaEntry(version uint32) xdr.BucketEntry {
 	return xdr.BucketEntry{
 		Type: xdr.BucketEntryTypeMetaentry,
@@ -288,6 +749,30 @@ func entryAccount(t xdr.BucketEntryType, id string, balance uint32) xdr.BucketEn
 	}
 }
 
+type errCloser struct {
+	io.Reader
+	err error
+}
+
+func (e errCloser) Close() error { return e.err }
+
+func createInvalidXdrStream(closeError error) *historyarchive.XdrStream {
+	b := &bytes.Buffer{}
+	writeInvalidFrame(b)
+
+	return historyarchive.NewXdrStream(errCloser{b, closeError})
+}
+
+func writeInvalidFrame(b *bytes.Buffer) {
+	bufferSize := b.Len()
+	err := historyarchive.WriteFramedXdr(b, metaEntry(1))
+	if err != nil {
+		panic(err)
+	}
+	frameSize := b.Len() - bufferSize
+	b.Truncate(bufferSize + frameSize/2)
+}
+
 func createXdrStream(entries ...xdr.BucketEntry) *historyarchive.XdrStream {
 	b := &bytes.Buffer{}
 	for _, e := range entries {
@@ -297,6 +782,10 @@ func createXdrStream(entries ...xdr.BucketEntry) *historyarchive.XdrStream {
 		}
 	}
 
+	return xdrStreamFromBuffer(b)
+}
+
+func xdrStreamFromBuffer(b *bytes.Buffer) *historyarchive.XdrStream {
 	return historyarchive.NewXdrStream(ioutil.NopCloser(b))
 }
 

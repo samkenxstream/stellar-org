@@ -1,9 +1,7 @@
 package horizon
 
 import (
-	"context"
 	"encoding/json"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -11,7 +9,6 @@ import (
 	"github.com/stellar/go/protocols/horizon/effects"
 	"github.com/stellar/go/protocols/horizon/operations"
 	"github.com/stellar/go/services/horizon/internal/db2/history"
-	"github.com/stellar/go/services/horizon/internal/render/sse"
 	"github.com/stellar/go/services/horizon/internal/test"
 )
 
@@ -215,27 +212,6 @@ func TestOperationActions_IncludeTransactions(t *testing.T) {
 	ht.Assert.Equal(withoutTransactions, withTransactions)
 }
 
-func TestOperationActions_SSE(t *testing.T) {
-	tt := test.Start(t).Scenario("failed_transactions")
-	defer tt.Finish()
-
-	ctx := context.Background()
-	stream := sse.NewStream(ctx, httptest.NewRecorder())
-	oa := OperationIndexAction{
-		Action: *NewTestAction(ctx, "/operations?account_id=GA5WBPYA5Y4WAEHXWR2UKO2UO4BUGHUQ74EUPKON2QHV4WRHOIRNKKH2"),
-	}
-
-	oa.SSE(stream)
-	tt.Require.NoError(oa.Err)
-
-	streamWithTransactions := sse.NewStream(ctx, httptest.NewRecorder())
-	oaWithTransactions := OperationIndexAction{
-		Action: *NewTestAction(ctx, "/operations?account_id=GA5WBPYA5Y4WAEHXWR2UKO2UO4BUGHUQ74EUPKON2QHV4WRHOIRNKKH2&join=transactions"),
-	}
-	oaWithTransactions.SSE(streamWithTransactions)
-	tt.Require.NoError(oaWithTransactions.Err)
-}
-
 func TestOperationActions_Show(t *testing.T) {
 	ht := StartHTTPTest(t, "base")
 	defer ht.Finish()
@@ -260,7 +236,7 @@ func TestOperationActions_Show(t *testing.T) {
 	ht.Assert.Equal(410, w.Code)
 }
 
-func TestOperationActions_Regressions(t *testing.T) {
+func TestOperationActions_StreamRegression(t *testing.T) {
 	ht := StartHTTPTest(t, "base")
 	defer ht.Finish()
 
@@ -270,10 +246,14 @@ func TestOperationActions_Regressions(t *testing.T) {
 	if ht.Assert.Equal(404, w.Code) {
 		ht.Assert.ProblemType(w.Body, "not_found")
 	}
+}
+
+func TestOperationActions_ShowRegression(t *testing.T) {
+	ht := StartHTTPTest(t, "trades")
+	defer ht.Finish()
 
 	// #202 - price is not shown on manage_offer operations
-	test.LoadScenario("trades")
-	w = ht.Get("/operations/25769807873")
+	w := ht.Get("/operations/25769807873")
 	if ht.Assert.Equal(200, w.Code) {
 		var result operations.ManageSellOffer
 		err := json.Unmarshal(w.Body.Bytes(), &result)
@@ -322,6 +302,35 @@ func TestOperationEffect_BumpSequence(t *testing.T) {
 		var result []effects.SequenceBumped
 		ht.UnmarshalPage(w.Body, &result)
 		ht.Assert.Equal(int64(300000000000), result[0].NewSeq)
+
+		data, err := json.Marshal(&result[0])
+		ht.Assert.NoError(err)
+		effect := struct {
+			NewSeq string `json:"new_seq"`
+		}{}
+
+		json.Unmarshal(data, &effect)
+		ht.Assert.Equal("300000000000", effect.NewSeq)
+	}
+}
+func TestOperationEffect_Trade(t *testing.T) {
+	ht := StartHTTPTest(t, "kahuna")
+	defer ht.Finish()
+
+	w := ht.Get("/operations/103079219201/effects")
+	if ht.Assert.Equal(200, w.Code) {
+		var result []effects.Trade
+		ht.UnmarshalPage(w.Body, &result)
+		ht.Assert.Equal(int64(3), result[0].OfferID)
+
+		data, err := json.Marshal(&result[0])
+		ht.Assert.NoError(err)
+		effect := struct {
+			OfferID string `json:"offer_id"`
+		}{}
+
+		json.Unmarshal(data, &effect)
+		ht.Assert.Equal("3", effect.OfferID)
 	}
 }
 
@@ -353,32 +362,17 @@ func TestOperation_IncludeTransaction(t *testing.T) {
 	ht.Require.NoError(err, "failed to parse body")
 	ht.Assert.Equal(transactionInOperationsResponse, getTransactionResponse)
 }
-
-// TestOperationActions_Show_Extra_TxID tests if failed transactions are not returned
-// when `tx_id` GET param is present. This was happening because `base.GetString()`
-// method retuns values from the query when URL param is not present.
 func TestOperationActions_Show_Extra_TxID(t *testing.T) {
 	ht := StartHTTPTest(t, "failed_transactions")
 	defer ht.Finish()
 
-	w := ht.Get("/accounts/GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON/operations?limit=200&tx_id=abc")
+	w := ht.Get("/accounts/GBXGQJWVLWOYHFLVTKWV5FGHA3LNYY2JQKM7OAJAUEQFU6LPCSEFVXON/operations?limit=200&tx_id=aa168f12124b7c196c0adaee7c73a64d37f99428cacb59a91ff389626845e7cf")
 
-	if ht.Assert.Equal(200, w.Code) {
-		records := []operations.Base{}
-		ht.UnmarshalPage(w.Body, &records)
-
-		successful := 0
-		failed := 0
-
-		for _, op := range records {
-			if op.TransactionSuccessful {
-				successful++
-			} else {
-				failed++
-			}
-		}
-
-		ht.Assert.Equal(3, successful)
-		ht.Assert.Equal(0, failed)
-	}
+	ht.Assert.Equal(400, w.Code)
+	payload := ht.UnmarshalExtras(w.Body)
+	ht.Assert.Equal("filters", payload["invalid_field"])
+	ht.Assert.Equal(
+		"Use a single filter for operations, you can't combine tx_id, account_id, and ledger_id",
+		payload["reason"],
+	)
 }

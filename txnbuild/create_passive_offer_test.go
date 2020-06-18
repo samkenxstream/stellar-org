@@ -1,9 +1,9 @@
 package txnbuild
 
 import (
+	"github.com/stellar/go/xdr"
 	"testing"
 
-	"github.com/stellar/go/network"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,14 +18,15 @@ func TestCreatePassiveSellOfferValidateBuyingAsset(t *testing.T) {
 		Price:   "1.0",
 	}
 
-	tx := Transaction{
-		SourceAccount: &sourceAccount,
-		Operations:    []Operation{&createPassiveOffer},
-		Timebounds:    NewInfiniteTimeout(),
-		Network:       network.TestNetworkPassphrase,
-	}
-
-	err := tx.Build()
+	_, err := NewTransaction(
+		TransactionParams{
+			SourceAccount:        &sourceAccount,
+			IncrementSequenceNum: false,
+			Operations:           []Operation{&createPassiveOffer},
+			BaseFee:              MinBaseFee,
+			Timebounds:           NewInfiniteTimeout(),
+		},
+	)
 	if assert.Error(t, err) {
 		expected := "validation failed for *txnbuild.CreatePassiveSellOffer operation: Field: Buying, Error: asset issuer: public key is undefined"
 		assert.Contains(t, err.Error(), expected)
@@ -44,14 +45,15 @@ func TestCreatePassiveSellOfferValidateSellingAsset(t *testing.T) {
 		Price:   "1.0",
 	}
 
-	tx := Transaction{
-		SourceAccount: &sourceAccount,
-		Operations:    []Operation{&createPassiveOffer},
-		Timebounds:    NewInfiniteTimeout(),
-		Network:       network.TestNetworkPassphrase,
-	}
-
-	err := tx.Build()
+	_, err := NewTransaction(
+		TransactionParams{
+			SourceAccount:        &sourceAccount,
+			IncrementSequenceNum: false,
+			Operations:           []Operation{&createPassiveOffer},
+			BaseFee:              MinBaseFee,
+			Timebounds:           NewInfiniteTimeout(),
+		},
+	)
 	if assert.Error(t, err) {
 		expected := `validation failed for *txnbuild.CreatePassiveSellOffer operation: Field: Selling, Error: asset code length must be between 1 and 12 characters`
 		assert.Contains(t, err.Error(), expected)
@@ -70,14 +72,15 @@ func TestCreatePassiveSellOfferValidateAmount(t *testing.T) {
 		Price:   "1.0",
 	}
 
-	tx := Transaction{
-		SourceAccount: &sourceAccount,
-		Operations:    []Operation{&createPassiveOffer},
-		Timebounds:    NewInfiniteTimeout(),
-		Network:       network.TestNetworkPassphrase,
-	}
-
-	err := tx.Build()
+	_, err := NewTransaction(
+		TransactionParams{
+			SourceAccount:        &sourceAccount,
+			IncrementSequenceNum: false,
+			Operations:           []Operation{&createPassiveOffer},
+			BaseFee:              MinBaseFee,
+			Timebounds:           NewInfiniteTimeout(),
+		},
+	)
 	if assert.Error(t, err) {
 		expected := `validation failed for *txnbuild.CreatePassiveSellOffer operation: Field: Amount, Error: amount can not be negative`
 		assert.Contains(t, err.Error(), expected)
@@ -96,16 +99,42 @@ func TestCreatePassiveSellOfferValidatePrice(t *testing.T) {
 		Price:   "-1.0",
 	}
 
-	tx := Transaction{
-		SourceAccount: &sourceAccount,
-		Operations:    []Operation{&createPassiveOffer},
-		Timebounds:    NewInfiniteTimeout(),
-		Network:       network.TestNetworkPassphrase,
-	}
-
-	err := tx.Build()
+	_, err := NewTransaction(
+		TransactionParams{
+			SourceAccount:        &sourceAccount,
+			IncrementSequenceNum: false,
+			Operations:           []Operation{&createPassiveOffer},
+			BaseFee:              MinBaseFee,
+			Timebounds:           NewInfiniteTimeout(),
+		},
+	)
 	if assert.Error(t, err) {
 		expected := `validation failed for *txnbuild.CreatePassiveSellOffer operation: Field: Price, Error: amount can not be negative`
 		assert.Contains(t, err.Error(), expected)
 	}
+}
+
+func TestCreatePassiveSellOfferPrice(t *testing.T) {
+	kp0 := newKeypair0()
+	sourceAccount := NewSimpleAccount(kp0.Address(), int64(41137196761100))
+
+	offer := CreatePassiveSellOffer{
+		Selling:       CreditAsset{"ABCD", kp0.Address()},
+		Buying:        NativeAsset{},
+		Amount:        "1",
+		Price:         "0.000000001",
+		SourceAccount: &sourceAccount,
+	}
+
+	xdrOp, err := offer.BuildXDR()
+	assert.NoError(t, err)
+	expectedPrice := xdr.Price{N: 1, D: 1000000000}
+	assert.Equal(t, expectedPrice, xdrOp.Body.CreatePassiveSellOfferOp.Price)
+	assert.Equal(t, offer.Price, offer.price.string())
+	assert.Equal(t, expectedPrice, offer.price.toXDR())
+
+	parsed := CreatePassiveSellOffer{}
+	assert.NoError(t, parsed.FromXDR(xdrOp))
+	assert.Equal(t, offer.Price, parsed.Price)
+	assert.Equal(t, offer.price, parsed.price)
 }

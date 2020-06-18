@@ -1,6 +1,7 @@
 package horizon
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -88,6 +89,20 @@ func TestTradeActions_Index(t *testing.T) {
 		ht.Assert.Contains(records[0], "counter_amount")
 	}
 
+	// empty response when assets exist but there are no trades
+	q = make(url.Values)
+	q.Add("base_asset_type", "credit_alphanum4")
+	q.Add("base_asset_code", "EUR")
+	q.Add("base_asset_issuer", "GCQPYGH4K57XBDENKKX55KDTWOTK5WDWRQOH2LHEDX3EKVIQRLMESGBG")
+	q.Add("counter_asset_type", "credit_alphanum4")
+	q.Add("counter_asset_code", "SEK")
+	q.Add("counter_asset_issuer", "GCQPYGH4K57XBDENKKX55KDTWOTK5WDWRQOH2LHEDX3EKVIQRLMESGBG")
+
+	w = ht.GetWithParams("/trades", q)
+	if ht.Assert.Equal(200, w.Code) {
+		ht.Assert.PageOf(0, w.Body)
+	}
+
 	// For offer
 	w = ht.Get("/offers/1/trades")
 	if ht.Assert.Equal(200, w.Code) {
@@ -154,6 +169,13 @@ func setAssetQuery(q *url.Values, prefix string, asset xdr.Asset) {
 	q.Add(prefix+"asset_type", assetType)
 	q.Add(prefix+"asset_code", assetCode)
 	q.Add(prefix+"asset_issuer", assetFilter)
+}
+
+// unsetAssetQuery removes an asset filter with a given prefix from a query
+func unsetAssetQuery(q *url.Values, prefix string) {
+	q.Del(prefix + "asset_type")
+	q.Del(prefix + "asset_code")
+	q.Del(prefix + "asset_issuer")
 }
 
 //testPrice ensures that the price float string is equal to the rational price
@@ -309,6 +331,48 @@ func TestTradeActions_Aggregation(t *testing.T) {
 	if ht.Assert.Equal(200, w.Code) {
 		ht.Assert.PageOf(0, w.Body)
 	}
+
+	//test non-existent base asset
+	foo := GetTestAsset("FOO")
+
+	unsetAssetQuery(&q, "base_")
+	setAssetQuery(&q, "base_", foo)
+
+	w = ht.GetWithParams(aggregationPath, q)
+	ht.Assert.Equal(404, w.Code)
+
+	jsonErr := map[string]interface{}{}
+	err = json.Unmarshal(w.Body.Bytes(), &jsonErr)
+	ht.Assert.NoError(err)
+	ht.Assert.Equal(float64(404), jsonErr["status"])
+	ht.Assert.Equal(
+		map[string]interface{}{
+			"invalid_field": "base_asset",
+			"reason":        "not found",
+		},
+		jsonErr["extras"],
+	)
+
+	unsetAssetQuery(&q, "base_")
+	setAssetQuery(&q, "base_", ass1)
+
+	//test non-existent counter asset
+	unsetAssetQuery(&q, "counter_")
+	setAssetQuery(&q, "counter_", foo)
+
+	w = ht.GetWithParams(aggregationPath, q)
+	ht.Assert.Equal(404, w.Code)
+
+	err = json.Unmarshal(w.Body.Bytes(), &jsonErr)
+	ht.Assert.NoError(err)
+	ht.Assert.Equal(float64(404), jsonErr["status"])
+	ht.Assert.Equal(
+		map[string]interface{}{
+			"invalid_field": "counter_asset",
+			"reason":        "not found",
+		},
+		jsonErr["extras"],
+	)
 }
 
 func TestTradeActions_AmountsExceedInt64(t *testing.T) {
